@@ -1,0 +1,12 @@
+.pio
+.vscode/
+
+# macOS
+.DS_Store
+
+# Large / vendor / investigation files — not part of the firmware source.
+# (kept locally for reference, just not pushed to the public repo)
+ChiponeLCT_setup.exe
+icnd1065l_5958_DP32020A_red_frame.kvdat
+ICND1065L_datasheet_EN_2024_V1.0.pdf
+figures/
