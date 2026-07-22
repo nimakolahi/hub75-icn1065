@@ -67,7 +67,7 @@ The bottom 12 of those 16 bits carry actual grayscale data (`gclk_bits = 12`, bi
 
 ### Physical structure
 
-Each ICN1065 chip has **48 output pins**: 16 outputs × 3 color channels (R, G, B). For a 64-column panel, you need 4 ICN1065 chips daisy-chained per row. The chips are connected in two separate serial chains:
+Each ICN1065 chip has **16 output channels** (24-pin SSOP package, per the Chipone datasheet). For a 64-column panel, you need 4 ICN1065 chips daisy-chained per row (4 × 16 = 64 channels per chain, matching the panel's column count). The chips are connected in two separate serial chains:
 - Chain 1 carries R1G1B1 data (upper half of the panel)
 - Chain 2 carries R2G2B2 data (lower half of the panel)
 
@@ -720,20 +720,20 @@ enum{ICN1065_ROW_OE_ADD_LEN = 126};   // keep total = 128
 
 ---
 
-### Bug 2: Wrong coordinate mapping formula
+### Bug 2: Coordinate mapping — needed the linear-scan variant, not the interleaved one
 
 **Symptom:** After fixing Bug 1, `drawPixel(0,0)` correctly lit row 0, `drawPixel(0,15)` correctly lit row 15, but `drawPixel(0,1)` lit row 2 and `drawPixel(0,2)` lit row 4.
 
-**Root cause:** The `VP_FOUR_SCAN_32PX_HIGH` formula in `VirtualMatrixPanel::getCoords()` was based on the library's `fillRectBufferVirtual()` formula, which encodes a 3-bit rotation of `ry_in_band`:
+**Root cause:** The default `VP_FOUR_SCAN_32PX_HIGH` formula in `VirtualMatrixPanel::getCoords()` (matching the main library's `fillRectBufferVirtual()`) encodes a 3-bit rotation of `ry_in_band`. This is the correct formula for panels wired with **interleaved** scan addressing (addresses ordered 0,4,1,5,2,6,3,7) — it is not itself wrong, it's just a different variant than this panel needs:
 
 ```cpp
-// Wrong — assumes interleaved scan order:
+// Interleaved-scan variant — correct for panels addressed 0,4,1,5,2,6,3,7 (not this one):
 dma_y = (ry >> 4) * 8 + ((ry_in_band & 3) << 1) + ((ry_in_band >> 2) & 1);
 ```
 
-This formula is correct for panels where scan addresses are ordered 0,4,1,5,2,6,3,7. This panel uses **linear** scan order (address k → row k), so the rotation is wrong.
+This panel uses **linear** scan order (address k → row k) instead, so it needs a different mapping variant.
 
-**Fix:** Replace with the direct mapping:
+**Fix:** Use the linear-scan mapping:
 
 ```cpp
 // Correct — linear scan order:
