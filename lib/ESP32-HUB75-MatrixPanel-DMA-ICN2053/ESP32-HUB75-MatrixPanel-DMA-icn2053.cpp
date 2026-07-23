@@ -1064,9 +1064,21 @@ IRAM_ATTR void MatrixPanel_DMA::flipBuffer()
     if (frame_buffer.len != 0)
     {
 #if ICN1065_VSYNC_BEFORE_DATA
-      if (m_cfg.driver == ICN1065) sendVsync();
-#endif
+      if (m_cfg.driver == ICN1065)
+      {
+        // TRUE REORDER (not additive): vsync/config BEFORE data, and skip the
+        // normal trailing vsync via autoVsync=false — one config-train event
+        // per commit, just relocated, instead of two per commit (which is
+        // what the earlier additive version did and is the likely reason it
+        // caused visible flicker on low-motion/static content).
+        sendVsync();
+        sendFrame(false, false);
+      }
+      else
+        sendFrame();
+#else
       sendFrame();
+#endif
     }
   }else
   {
@@ -1079,9 +1091,16 @@ IRAM_ATTR void MatrixPanel_DMA::flipBuffer()
       waitDmaReady();
       back_buffer_id ^= 1;
 #if ICN1065_VSYNC_BEFORE_DATA
-      if (m_cfg.driver == ICN1065) sendVsync();
-#endif
+      if (m_cfg.driver == ICN1065)
+      {
+        sendVsync();
+        sendFrame(false, false);
+      }
+      else
+        sendFrame();
+#else
       sendFrame();
+#endif
     }else
     {
       //shift

@@ -300,28 +300,29 @@ enum{ICN2053_ROW_OE_LEN = ICN2053_ROW_OE_CNT*2 + ICN2053_ROW_OE_ADD_LEN}; //об
 // board707 (github.com/board707/DMD_STM32#217) asked why pixel data appears to
 // go out before the config/vsync train in a logic capture. This codebase's
 // normal commit order is data-first, vsync-last (shift, then latch — see
-// sendCallback() in icn2053.cpp). This flag fires an EXTRA vsync/config send
-// (via the already-proven sendVsync(), same one icn2053init() uses in a loop)
-// immediately BEFORE each commit's data, so config genuinely precedes data on
-// the wire for that commit too. ADDITIVE — the normal post-data vsync still
-// happens as before; this does not remove or reorder the existing state
-// machine, just prepends an extra vsync send.
-// CONFIRMED ON HARDWARE (July 2026), two conflicting results depending on
-// commit frequency:
-//   - Continuous commits (scrollTextInBox, many flips/sec): measurably REDUCES
-//     the shadow/ghost-trail artifact. Good.
-//   - Sparse commits (this repo's once-per-second stopwatch): the extra vsync
-//     causes a real, visible blank — text flashes on then goes black every
-//     single update ("00:00" flash, black, "00:01" flash, black, ...).
-//     Confirmed by isolation: disabling this flag alone fixes it. Likely
-//     explanation: the extra vsync send causes a brief real glitch every time
-//     it fires; frequent commits mask it into the shadow-trail texture,
-//     sparse commits expose it as a distinct on/off flash.
-// Rather than disabling this fix for the stopwatch, main.cpp's loop() now
-// commits continuously (like scrollTextInBox already does) instead of once
-// per second, so the per-commit glitch blends into a steady stream instead of
-// standing alone as a visible flash. See loop() for the continuous-commit
-// version — if that doesn't fully eliminate the toggling, fall back to 0 here.
+// sendCallback() in icn2053.cpp).
+//
+// v1 (ADDITIVE, superseded): fired an EXTRA vsync/config send before data,
+// keeping the normal trailing vsync too — two full config-train events per
+// commit. Measurably reduced shadow-trail on continuous commits (scrolling),
+// but caused a real, visible blank on sparse commits (this repo's once-per-
+// second stopwatch: text flashes on then goes black every update). Even
+// switching the stopwatch to commit continuously only reduced the flicker,
+// never eliminated it — consistent with TWO glitch-causing config events per
+// commit rather than one.
+//
+// v2 (TRUE REORDER, current): fires vsync/config before data via sendVsync(),
+// then sends data via sendFrame(false, false) with autoVsync=false to SKIP
+// the normal trailing vsync. One config-train event per commit, same as
+// stock — just relocated to before the data instead of after. This still
+// answers board707's original question (config genuinely precedes data), but
+// without doubling the per-commit config-event count. Tradeoff: data shifted
+// in during a commit isn't latched until the NEXT commit's leading vsync (a
+// one-commit-late latch) — imperceptible in a continuous commit stream,
+// unconfirmed whether it matters for very sparse/one-shot commits.
+// UNTESTED ON HARDWARE as of this edit — see loop()'s continuous-commit
+// stopwatch for the test case. Set to 0 to disable (stock: data-first,
+// single trailing vsync, no reorder at all).
 #define ICN1065_VSYNC_BEFORE_DATA 1
 
 //named constants for ICN1065
