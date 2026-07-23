@@ -1057,27 +1057,36 @@ void MatrixPanel_DMA::stopDMAoutput()
 } 
 
 //переключить DMA буфер
-IRAM_ATTR void MatrixPanel_DMA::flipBuffer() 
-{         
+IRAM_ATTR void MatrixPanel_DMA::flipBuffer()
+{
   if (!m_cfg.double_buff)
   {
-    if (frame_buffer.len != 0) sendFrame();
+    if (frame_buffer.len != 0)
+    {
+#if ICN1065_VSYNC_BEFORE_DATA
+      if (m_cfg.driver == ICN1065) sendVsync();
+#endif
+      sendFrame();
+    }
   }else
   {
-    #ifdef SERIAL_DEBUG     
+    #ifdef SERIAL_DEBUG
     //Serial.printf_P(PSTR("Set show buffer to: %d\n"), back_buffer_id);
-    #endif      
+    #endif
     if (frame_buffer.len != 0)
     {
       //waitDmaReady();
       waitDmaReady();
       back_buffer_id ^= 1;
+#if ICN1065_VSYNC_BEFORE_DATA
+      if (m_cfg.driver == ICN1065) sendVsync();
+#endif
       sendFrame();
     }else
     {
       //shift
     }
-  }      
+  }
 }
 
 //переключить DMA буфер

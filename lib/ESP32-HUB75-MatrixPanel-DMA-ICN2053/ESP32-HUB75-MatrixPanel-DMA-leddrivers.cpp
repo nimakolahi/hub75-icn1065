@@ -380,6 +380,37 @@ static void icn1065WidenOEPulses(ESP32_I2S_DMA_STORAGE_TYPE* buffer, size_t len)
     prev_high = (buffer[t ^ 1] & BIT_OE) != 0;
   }
 }
+
+// Additional widening for the address-0/scan-restart OE pulse ONLY, applied
+// AFTER icn1065WidenOEPulses() has already widened every pulse in the buffer
+// (including this one) to the regular ICN1065_OE_LEN_REGULAR width. Per
+// board707 (github.com/board707/DMD_STM32#217, logic-analyzer capture against
+// the datasheet), the pulse marking a scan restart must be
+// ICN1065_OE_LEN_RESTART (12) clocks, not 4 — this tops up just the FIRST OE
+// edge found in the buffer with the remaining ticks. Same contiguous-high,
+// no-new-edge technique as icn1065WidenOEPulses (iron rule preserved).
+//
+// Only safe to call on buffers where the first OE edge really is a scan
+// restart: offset_prefix and offset_suffix are both generated starting at
+// frame_offset=0 (address 0), so their first edge always qualifies. Do NOT
+// call this on the per-row data buffers — a restart can land mid-buffer there
+// and this function has no address context to know where.
+static void icn1065WidenRestartOEPulse(ESP32_I2S_DMA_STORAGE_TYPE* buffer, size_t len)
+{
+  enum { EXTRA_RESTART = ICN1065_OE_LEN_RESTART - ICN1065_OE_LEN_REGULAR };
+  bool prev_high = false;
+  for (size_t t = 0; t < len; t++)
+  {
+    bool high = (buffer[t ^ 1] & BIT_OE) != 0;
+    if (high && !prev_high)
+    {
+      for (size_t k = t + 1; k <= t + EXTRA_RESTART && k < len; k++)
+        buffer[k ^ 1] |= BIT_OE;
+      return;   // only the first edge in the buffer — every later pulse is left alone
+    }
+    prev_high = high;
+  }
+}
 #endif
 
 void MatrixPanel_DMA::icn2053initBuffers()
@@ -445,7 +476,13 @@ void MatrixPanel_DMA::icn2053initBuffers()
                                                     rows_per_frame, dma_buff.frame_prefix_len, 0, row_oe_cnt, row_oe_add_len, m_cfg.decoder_INT595);
 #if ICN1065_OE_PULSE_EXTRA > 0
   if (m_cfg.driver == ICN1065)
+  {
     icn1065WidenOEPulses(dma_buff.rowBits[offset_prefix], dma_buff.frame_prefix_len);
+    // Prefix generation above starts fresh at address 0 (frame_offset=0), so
+    // its first OE edge is always the scan-restart pulse — see
+    // icn1065WidenRestartOEPulse() for why this is safe here.
+    icn1065WidenRestartOEPulse(dma_buff.rowBits[offset_prefix], dma_buff.frame_prefix_len);
+  }
 #endif
 
   frame_offset_prefix %= dma_buff.frame_suffix_len;
@@ -466,7 +503,13 @@ void MatrixPanel_DMA::icn2053initBuffers()
                          row_oe_cnt, row_oe_add_len, m_cfg.decoder_INT595);
 #if ICN1065_OE_PULSE_EXTRA > 0
   if (m_cfg.driver == ICN1065)
+  {
     icn1065WidenOEPulses(dma_buff.rowBits[offset_suffix], dma_buff.frame_suffix_len);
+    // Suffix generation above also starts fresh at address 0 (frame_offset=0),
+    // AND this is a static buffer the DMA re-reads on every loop iteration, so
+    // baking the wider restart pulse in once is correct on every replay too.
+    icn1065WidenRestartOEPulse(dma_buff.rowBits[offset_suffix], dma_buff.frame_suffix_len);
+  }
 #endif
 
   //int desk_idx_next;

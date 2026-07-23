@@ -272,11 +272,57 @@ enum{ICN2053_ROW_OE_LEN = ICN2053_ROW_OE_CNT*2 + ICN2053_ROW_OE_ADD_LEN}; //об
 
 // Widen every ROW/OE scan pulse by this many extra ticks after its rising edge
 // (contiguous high → no new edge; edge count and positions unchanged, so the
-// chip's row pointer can't desync). The stock pulse is only 1 tick wide (200 ns
-// at 5 MHz), already below the ICND1065 datasheet's 280 ns twROW minimum, and
-// further below it at faster DCLK. 2 extra ticks makes it 3 ticks wide: 600 ns
-// @5 MHz, 300 ns @10 MHz (both in spec). Set to 0 for the original 1-tick pulse.
-#define ICN1065_OE_PULSE_EXTRA 2
+// chip's row pointer can't desync). The stock pulse is only 1 tick wide.
+//
+// SUPERSEDED as of July 2026 (per board707, github.com/board707/DMD_STM32#217,
+// logic-analyzer capture against the datasheet): the real spec is a
+// CLOCK-CYCLE COUNT, not an absolute-time target — every regular row-address
+// OE pulse must be ICN1065_OE_LEN_REGULAR (4) clocks wide, independent of
+// clk_freq. EXTRA is fixed at 3 (base 1 tick + 3 = 4) regardless of clock
+// speed. See ICN1065_OE_LEN_RESTART below for the address-0/scan-restart
+// pulse, which needs a DIFFERENT width (12 clocks) — handled separately by
+// icn1065WidenRestartOEPulse() in the .cpp.
+// Set to 0 for the original 1-tick pulse.
+#define ICN1065_OE_PULSE_EXTRA 3
+
+// Explicit clock-cycle-count targets (per board707's logic-analyzer read of the
+// datasheet, github.com/board707/DMD_STM32#217): the OE pulse marking a scan
+// restart (address wraps back to 0) must be 12 clocks; every other row-address
+// OE pulse must be 4 clocks (== 1 base tick + ICN1065_OE_PULSE_EXTRA above).
+// Only offset_prefix and offset_suffix currently get the restart-specific
+// widening (icn1065WidenRestartOEPulse() in the .cpp) — both are generated
+// starting fresh at address 0, so their first OE edge is always the restart
+// pulse. NOT yet applied to the per-row data buffers, where a restart can land
+// mid-buffer and there's no cheap way to know where without more plumbing.
+#define ICN1065_OE_LEN_REGULAR 4
+#define ICN1065_OE_LEN_RESTART 12
+
+// board707 (github.com/board707/DMD_STM32#217) asked why pixel data appears to
+// go out before the config/vsync train in a logic capture. This codebase's
+// normal commit order is data-first, vsync-last (shift, then latch — see
+// sendCallback() in icn2053.cpp). This flag fires an EXTRA vsync/config send
+// (via the already-proven sendVsync(), same one icn2053init() uses in a loop)
+// immediately BEFORE each commit's data, so config genuinely precedes data on
+// the wire for that commit too. ADDITIVE — the normal post-data vsync still
+// happens as before; this does not remove or reorder the existing state
+// machine, just prepends an extra vsync send.
+// CONFIRMED ON HARDWARE (July 2026), two conflicting results depending on
+// commit frequency:
+//   - Continuous commits (scrollTextInBox, many flips/sec): measurably REDUCES
+//     the shadow/ghost-trail artifact. Good.
+//   - Sparse commits (this repo's once-per-second stopwatch): the extra vsync
+//     causes a real, visible blank — text flashes on then goes black every
+//     single update ("00:00" flash, black, "00:01" flash, black, ...).
+//     Confirmed by isolation: disabling this flag alone fixes it. Likely
+//     explanation: the extra vsync send causes a brief real glitch every time
+//     it fires; frequent commits mask it into the shadow-trail texture,
+//     sparse commits expose it as a distinct on/off flash.
+// Rather than disabling this fix for the stopwatch, main.cpp's loop() now
+// commits continuously (like scrollTextInBox already does) instead of once
+// per second, so the per-commit glitch blends into a steady stream instead of
+// standing alone as a visible flash. See loop() for the continuous-commit
+// version — if that doesn't fully eliminate the toggling, fall back to 0 here.
+#define ICN1065_VSYNC_BEFORE_DATA 1
 
 //named constants for ICN1065
 enum{ICN1065_PREFIX_CNT = 1}; //number of DMA prefix buffers

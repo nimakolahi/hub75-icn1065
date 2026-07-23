@@ -57,10 +57,7 @@ void setup() {
       .clk = 16,
     },
     .driver = ICN1065,
-    .clk_freq = HZ_10M,   // EXPERIMENT 9: 2x DCLK → commits ~13 ms instead of ~26 ms
-                          // (chip max 25 MHz; working card runs 12.5 MHz). Requires the
-                          // widened OE pulse (ICN1065_OE_PULSE_EXTRA) to meet twROW 280ns.
-                          // Fallback ladder: HZ_5M here → then ICN1065_OE_PULSE_EXTRA 0.
+    .clk_freq = HZ_10M, 
     .clk_phase = CLK_POZITIVE,
     .color_depth = COLORx16,
     .double_buff = DOUBLE_BUFF_ON, 
@@ -195,9 +192,19 @@ inline char utf8CharToLatin1(const char* utf8char) {
 
 void loop() {
 // ── Stopwatch display ─────────────────────────────────────────────────────────
-// Counts up from 00:00 since boot. Only redraws when the displayed second
-// actually changes, so this doesn't hammer the panel every loop() pass.
+// Counts up from 00:00 since boot. The digits only get RE-RENDERED into the
+// offscreen canvas when the displayed second actually changes (cheap), but
+// the canvas is blitted + flipped EVERY loop() pass, continuously — same
+// structure as scrollTextInBox. This isn't about buffer staleness (a 2-pass
+// redraw already fixed that); it's because ICN1065_VSYNC_BEFORE_DATA's extra
+// vsync send causes a brief real blank each time it fires, which is invisible
+// inside a continuous commit stream (scrolling) but reads as a distinct
+// flash-then-black when commits are sparse (a lone commit once a second).
+// Committing continuously — even when the digits haven't changed — keeps the
+// panel in the same "steady stream" regime scrolling already benefits from.
 static uint32_t lastShownSec = UINT32_MAX;
+static GFXcanvas16 clockCanvas(VIRTUAL_PANEL_W, VIRTUAL_PANEL_H - 12);
+if (!clockCanvas.getBuffer()) return;   // not enough heap for this canvas size
 
 uint32_t elapsedSec = (millis() - timerStartMs) / 1000;
 if (elapsedSec != lastShownSec) {
@@ -205,12 +212,18 @@ if (elapsedSec != lastShownSec) {
   uint32_t minutes = (elapsedSec / 60) % 100;   // wraps at 99:59
   uint32_t seconds = elapsedSec % 60;
 
-  vdisplay->setFont(&FreeSans9pt8b_IT);
-  vdisplay->setTextSize(2);
-  vdisplay->fillRect(0, 12, vdisplay->width(), vdisplay->height(), color565(0, 0, 0));
-  vdisplay->setCursor(0, 40);
-  vdisplay->setTextColor(color565(255, 255, 255));
-  vdisplay->printf("%02u:%02u", minutes, seconds);
-  vdisplay->flipDMABuffer();
+  clockCanvas.setFont(&FreeSans9pt8b_IT);
+  clockCanvas.setTextSize(2);
+  clockCanvas.fillScreen(color565(0, 0, 0));
+  clockCanvas.setCursor(0, 40 - 12);   // canvas-local Y (canvas starts at panel Y=12)
+  clockCanvas.setTextColor(color565(255, 255, 255));
+  clockCanvas.printf("%02u:%02u", minutes, seconds);
 }
+
+// Blit the WHOLE canvas + one atomic flip, every iteration, unconditionally.
+for (int16_t row = 0; row < clockCanvas.height(); row++)
+    for (int16_t col = 0; col < clockCanvas.width(); col++)
+        vdisplay->drawPixel(col, row + 12, clockCanvas.getPixel(col, row));
+vdisplay->flipDMABuffer();
+
 }
