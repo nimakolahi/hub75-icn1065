@@ -41,6 +41,24 @@ void setup() {
     .mx_count_width = PANELS_X,
     .mx_count_height = PANELS_Y,
     .gpio = {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+      // ESP32-S3 pin mapping (adjust to your wiring)
+      .r1 = 1,
+      .g1 = 2,
+      .b1 = 42,
+      .r2 = 41,
+      .g2 = 40,
+      .b2 = 39,
+      .a = 38,
+      .b = 37,
+      .c = 36,
+      .d = -1,
+      .e = -1,
+      .lat = 35,
+      .oe = 21,
+      .clk = 47,
+#else
+      // Original ESP32 pin mapping
       .r1 = 25,
       .g1 = 26,
       .b1 = 27,
@@ -55,6 +73,7 @@ void setup() {
       .lat = 4,
       .oe = 15,
       .clk = 16,
+#endif
     },
     .driver = ICN1065,
     .clk_freq = HZ_10M, 
