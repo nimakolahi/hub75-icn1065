@@ -297,6 +297,36 @@ enum{ICN2053_ROW_OE_LEN = ICN2053_ROW_OE_CNT*2 + ICN2053_ROW_OE_ADD_LEN}; //об
 #define ICN1065_OE_LEN_REGULAR 4
 #define ICN1065_OE_LEN_RESTART 12
 
+// board707 (github.com/board707/DMD_STM32#217, hardware capture of OUR actual
+// output + a DP3264 reference timing diagram): our OE pulse currently rises at
+// the SAME tick as the row-address (A/B/C/D/E) lines change. That's wrong —
+// physical row decoders take real time to settle and the previous row's LEDs
+// don't turn off instantly, so switching OE at the same instant as the
+// address risks bleed/ghosting onto the adjacent row. His DP3264 reference
+// delays OE by 20 clocks after the address change; using that exact value per
+// his direct recommendation (his suggested range was 15-25).
+// Applied via icn1065DelayOEPulses() in the .cpp, which runs BEFORE the
+// width-widening passes (icn1065WidenOEPulses/icn1065WidenRestartOEPulse) —
+// it shifts each still-1-tick base pulse later by this many ticks, so the
+// widening passes then correctly find and widen the edge at its NEW position.
+// Same edge-count-preserving technique as the width-only changes: every pulse
+// still has exactly one rising and one falling edge, just moved later within
+// its 128-tick slot — nothing added or removed.
+// Ported from HUB75_1065L1.0 (July 2026), where the first hardware test at 20
+// made things worse — but that test ran with a real bug present: row_data_len
+// isn't a multiple of the 128-tick OE cycle (drifts 8 ticks/row), so
+// icn1065DelayOEPulses() was silently DROPPING the last OE edge in ~19% of
+// per-row buffers instead of shifting it (edge-count violation). Fixed here
+// (see the "if (nt >= len) continue" fallback in the .cpp) before porting, so
+// this is an untested-on-this-repo's-hardware, bug-fixed first attempt, not a
+// known-bad value. There's also an unresolved caveat from that session: the
+// pulse board707 labeled "20 clk" is captioned "GCLK" in his own diagram,
+// which per the DP3264S datasheet is the INTERNAL PLL grayscale/PWM clock,
+// not necessarily ROW/OE — his WRITTEN recommendation stands on its own
+// regardless, but if this still looks wrong on hardware, that labeling
+// question is the next lead. Set to 0 to disable.
+#define ICN1065_OE_DELAY_AFTER_ADDR 20
+
 // board707 (github.com/board707/DMD_STM32#217) asked why pixel data appears to
 // go out before the config/vsync train in a logic capture. This codebase's
 // normal commit order is data-first, vsync-last (shift, then latch — see

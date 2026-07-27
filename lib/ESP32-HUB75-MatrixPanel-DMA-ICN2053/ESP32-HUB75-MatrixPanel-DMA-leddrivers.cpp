@@ -362,6 +362,50 @@ void MatrixPanel_DMA::icn2053setReg(uint8_t reg_idx, driver_rgb_t* regs_data)
 }
 
 //инициализация буферов и дескрипторов
+// Shift every OE pulse LATER by ICN1065_OE_DELAY_AFTER_ADDR ticks (see
+// leddrivers.h for why — board707's row-decoder-settling concern). Must run
+// BEFORE icn1065WidenOEPulses()/icn1065WidenRestartOEPulse(): those widen
+// whatever the current rising edge is, so running this first means they
+// correctly widen the delayed position instead of the original one.
+//
+// Two-pass by necessity: pass 1 finds every ORIGINAL rising-edge position
+// with a read-only scan; pass 2 clears each original pulse and re-sets it at
+// the delayed position. Doing this in a single forward pass would corrupt
+// the scan — a newly-inserted delayed pulse sitting ahead of the scan
+// pointer would itself look like a fresh "rising edge" when the scan reached
+// it, and get delayed AGAIN, cascading forward. Operates only on the
+// still-1-tick base pulses (runs before any widening), so no width detection
+// needed — same edge count in, same edge count out, iron rule preserved.
+#if ICN1065_OE_DELAY_AFTER_ADDR > 0
+static void icn1065DelayOEPulses(ESP32_I2S_DMA_STORAGE_TYPE* buffer, size_t len)
+{
+  enum { MAX_PULSES = 64 };   // generous — far more than any real ROW_ADDR_BITS-worth of addresses
+  size_t positions[MAX_PULSES];
+  size_t count = 0;
+  bool prev_high = false;
+  for (size_t t = 0; t < len && count < MAX_PULSES; t++)
+  {
+    bool high = (buffer[t ^ 1] & BIT_OE) != 0;
+    if (high && !prev_high) positions[count++] = t;
+    prev_high = high;
+  }
+  for (size_t i = 0; i < count; i++)
+  {
+    size_t t = positions[i];
+    size_t nt = t + ICN1065_OE_DELAY_AFTER_ADDR;
+    // row_data_len is not a multiple of the 128-tick OE cycle (drifts by 8
+    // ticks/row), so a pulse can legitimately land within DELAY ticks of the
+    // buffer end. Don't clear+drop it in that case — leave it at its
+    // original (undelayed) position instead, so the failure mode is "one
+    // pulse late by 0" rather than "one pulse missing" (iron rule: edge
+    // count must never change).
+    if (nt >= len) continue;
+    buffer[t ^ 1] &= ~BIT_OE;
+    buffer[nt ^ 1] |= BIT_OE;
+  }
+}
+#endif
+
 // Widen each ROW/OE scan pulse by ICN1065_OE_PULSE_EXTRA ticks after its rising
 // edge, to satisfy the ICND1065's 280 ns twROW minimum at faster DCLK.
 // Contiguous high extension only — edge count and edge positions are unchanged.
@@ -397,14 +441,18 @@ static void icn1065WidenOEPulses(ESP32_I2S_DMA_STORAGE_TYPE* buffer, size_t len)
 // and this function has no address context to know where.
 static void icn1065WidenRestartOEPulse(ESP32_I2S_DMA_STORAGE_TYPE* buffer, size_t len)
 {
-  enum { EXTRA_RESTART = ICN1065_OE_LEN_RESTART - ICN1065_OE_LEN_REGULAR };
   bool prev_high = false;
   for (size_t t = 0; t < len; t++)
   {
     bool high = (buffer[t ^ 1] & BIT_OE) != 0;
     if (high && !prev_high)
     {
-      for (size_t k = t + 1; k <= t + EXTRA_RESTART && k < len; k++)
+      // BUG FIXED (per board707's logic-analyzer measurement — this was
+      // producing 9 clocks, not 12): ticks t..t+ICN1065_OE_LEN_REGULAR-1 are
+      // ALREADY high from the prior icn1065WidenOEPulses() pass, so the extra
+      // ticks must start AFTER that, not at t+1 (which redundantly re-set
+      // already-high ticks and only net 5 new ones instead of 8).
+      for (size_t k = t + ICN1065_OE_LEN_REGULAR; k < t + ICN1065_OE_LEN_RESTART && k < len; k++)
         buffer[k ^ 1] |= BIT_OE;
       return;   // only the first edge in the buffer — every later pulse is left alone
     }
@@ -450,6 +498,10 @@ void MatrixPanel_DMA::icn2053initBuffers()
       frame_offset_data = icn20xxsetOEaddrBuffer(dma_buff.rowBits[row_offset + row], 0, rows_per_frame, dma_buff.row_data_len,
                                                  frame_offset_data, row_oe_cnt, row_oe_add_len, m_cfg.decoder_INT595);
       setLatRowBuffer(dma_buff.rowBits[row_offset + row],0,DRIVER_BITS,pixels_per_row);
+#if ICN1065_OE_DELAY_AFTER_ADDR > 0
+      if (m_cfg.driver == ICN1065)
+        icn1065DelayOEPulses(dma_buff.rowBits[row_offset + row], dma_buff.row_data_len);
+#endif
 #if ICN1065_OE_PULSE_EXTRA > 0
       if (m_cfg.driver == ICN1065)
         icn1065WidenOEPulses(dma_buff.rowBits[row_offset + row], dma_buff.row_data_len);
@@ -474,6 +526,10 @@ void MatrixPanel_DMA::icn2053initBuffers()
   //индекс смещения относительно начала кадра
   int frame_offset_prefix = icn20xxsetOEaddrBuffer(dma_buff.rowBits[offset_prefix], FRAME_ADD_LEN + frame_vsync_len,
                                                     rows_per_frame, dma_buff.frame_prefix_len, 0, row_oe_cnt, row_oe_add_len, m_cfg.decoder_INT595);
+#if ICN1065_OE_DELAY_AFTER_ADDR > 0
+  if (m_cfg.driver == ICN1065)
+    icn1065DelayOEPulses(dma_buff.rowBits[offset_prefix], dma_buff.frame_prefix_len);
+#endif
 #if ICN1065_OE_PULSE_EXTRA > 0
   if (m_cfg.driver == ICN1065)
   {
@@ -501,6 +557,10 @@ void MatrixPanel_DMA::icn2053initBuffers()
   //заполняем буфер регененерации строк
   icn20xxsetOEaddrBuffer(dma_buff.rowBits[offset_suffix], 0, rows_per_frame, dma_buff.frame_suffix_len, 0,
                          row_oe_cnt, row_oe_add_len, m_cfg.decoder_INT595);
+#if ICN1065_OE_DELAY_AFTER_ADDR > 0
+  if (m_cfg.driver == ICN1065)
+    icn1065DelayOEPulses(dma_buff.rowBits[offset_suffix], dma_buff.frame_suffix_len);
+#endif
 #if ICN1065_OE_PULSE_EXTRA > 0
   if (m_cfg.driver == ICN1065)
   {
