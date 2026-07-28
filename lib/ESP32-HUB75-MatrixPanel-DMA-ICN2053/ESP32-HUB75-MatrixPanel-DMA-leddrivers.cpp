@@ -535,8 +535,13 @@ void MatrixPanel_DMA::icn2053initBuffers()
   {
     icn1065WidenOEPulses(dma_buff.rowBits[offset_prefix], dma_buff.frame_prefix_len);
     // Prefix generation above starts fresh at address 0 (frame_offset=0), so
-    // its first OE edge is always the scan-restart pulse — see
-    // icn1065WidenRestartOEPulse() for why this is safe here.
+    // its first OE edge is always the scan-restart pulse. This is the ONLY
+    // place the 12-clock width belongs (per board707, github.com/board707/
+    // DMD_STM32#217, 2026-07-28): it must follow an actual config-register
+    // load, and the prefix is sent exactly once per commit, right after the
+    // vsync/config train — see icn1065WidenRestartOEPulse() for more.
+    // Do NOT also widen the suffix's row-0 wrap (see below) — it repeats
+    // continuously with no fresh config load in between.
     icn1065WidenRestartOEPulse(dma_buff.rowBits[offset_prefix], dma_buff.frame_prefix_len);
   }
 #endif
@@ -563,13 +568,14 @@ void MatrixPanel_DMA::icn2053initBuffers()
 #endif
 #if ICN1065_OE_PULSE_EXTRA > 0
   if (m_cfg.driver == ICN1065)
-  {
     icn1065WidenOEPulses(dma_buff.rowBits[offset_suffix], dma_buff.frame_suffix_len);
-    // Suffix generation above also starts fresh at address 0 (frame_offset=0),
-    // AND this is a static buffer the DMA re-reads on every loop iteration, so
-    // baking the wider restart pulse in once is correct on every replay too.
-    icn1065WidenRestartOEPulse(dma_buff.rowBits[offset_suffix], dma_buff.frame_suffix_len);
-  }
+    // NOT widened to the restart width here (bug found/fixed per board707,
+    // github.com/board707/DMD_STM32#217, 2026-07-28): the 12-clock pulse must
+    // only follow an actual configuration-register load, which happens once
+    // per prefix send (see above) — NOT on every row-0 wrap. This suffix
+    // buffer is the static, continuously-looping scan buffer the DMA re-reads
+    // over and over with no fresh config load in between, so its row-0 wrap
+    // must stay the regular 4-clock width every time, same as any other row.
 #endif
 
   //int desk_idx_next;
