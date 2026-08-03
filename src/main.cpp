@@ -33,14 +33,35 @@ enum { DMA_PANEL_H      = SINGLE_PANEL_H / 2         };  // DMA height of ONE pa
 
 
 void setup() {
+  delay(1000);  // wait for serial monitor to open
   Serial.begin(115200);
-
+  delay(1000);  // wait for serial monitor to open
   hub75_cfg_t mxconfig = {
     .mx_width = DMA_PANEL_W,       // single-panel DMA width — library multiplies by count
     .mx_height = DMA_PANEL_H,      // single-panel DMA height
     .mx_count_width = PANELS_X,
     .mx_count_height = PANELS_Y,
     .gpio = {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+      // ESP32-S3 Super Mini pin mapping
+      // "Safe" GPIOs: 1, 2, 4, 5, 6, 7, 8, 15, 16, 17, 18, 21
+      // "Fine" GPIOs (JTAG): 3, 39, 40, 41
+      .r1 = 4,
+      .g1 = 5,
+      .b1 = 6,
+      .r2 = 7,
+      .g2 = 15,
+      .b2 = 16,
+      .a = 17,
+      .b = 18,
+      .c = 8,
+      .d = -1,
+      .e = -1,
+      .lat = 21,
+      .oe = 1,
+      .clk = 2,
+#else
+      // Original ESP32 pin mapping
       .r1 = 25,
       .g1 = 26,
       .b1 = 27,
@@ -55,6 +76,7 @@ void setup() {
       .lat = 4,
       .oe = 15,
       .clk = 16,
+#endif
     },
     .driver = ICN1065,
     .clk_freq = HZ_10M, 

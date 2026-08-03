@@ -4,7 +4,9 @@
  
 #pragma once
 
-#if defined(ESP32) || defined(IDF_VER)
+// This I2S-based parallel driver is only for the original ESP32 (not S2/S3/C3).
+// ESP32-S3 uses the LCD_CAM peripheral instead — see esp32s3_lcd_cam_parallel.h
+#if (defined(ESP32) || defined(IDF_VER)) && !defined(CONFIG_IDF_TARGET_ESP32S3) && !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3)
 
 #include <stdint.h>
 

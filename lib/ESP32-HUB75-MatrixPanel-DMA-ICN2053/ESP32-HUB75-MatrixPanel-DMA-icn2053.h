@@ -11,7 +11,13 @@
 /* Library Includes!                                                                   */
 //#include <memory>
 #include "esp_heap_caps.h"
-#include "esp32_i2s_parallel_v2.h"
+
+// Platform-specific parallel DMA output driver selection
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  #include "esp32s3_lcd_cam_parallel.h"
+#else
+  #include "esp32_i2s_parallel_v2.h"
+#endif
 
 #if defined(USE_GFX_ROOT)
 	#include <FastLED.h>    

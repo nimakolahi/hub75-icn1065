@@ -12,6 +12,9 @@
  *  3) https://github.com/TobleMiner/esp_i2s_parallel           for a cleaner implementation
  *
  */
+
+// Only compile for original ESP32 (not S2/S3/C3 which use different peripherals)
+#if !defined(CONFIG_IDF_TARGET_ESP32S3) && !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3)
  
 #include <stdbool.h>
 #include <stdint.h>
@@ -426,3 +429,5 @@ void i2s_parallel_set_previous_buffer_not_free()
   previousBufferFree = false;
 }
 
+
+#endif // !CONFIG_IDF_TARGET_ESP32S3 && !CONFIG_IDF_TARGET_ESP32S2 && !CONFIG_IDF_TARGET_ESP32C3
