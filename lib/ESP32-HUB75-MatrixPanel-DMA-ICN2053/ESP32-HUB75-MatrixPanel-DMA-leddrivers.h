@@ -329,10 +329,12 @@ enum{ICN2053_ROW_OE_LEN = ICN2053_ROW_OE_CNT*2 + ICN2053_ROW_OE_ADD_LEN}; //об
 enum{ICN1065_PREFIX_CNT = 1}; //number of DMA prefix buffers
 enum{ICN1065_SUFFIX_CNT = 1}; //number of DMA suffix buffers
 enum{ICN1065_DSUFFIX_CNT = 2}; //number of sets of DMA descriptors per suffix
-//for ICN1065 8S panels often requires two OE pulses per address position
-//diagnostic: 1 OE pulse to test row-group pairing; total window = 1*2 + 126 = 128 ticks
-enum{ICN1065_ROW_OE_CNT = 1};
-enum{ICN1065_ROW_OE_ADD_LEN = 126};
+//OE pulses per address. Register 0x0c=0x16 fixed the bulk of the ghost at its
+//source; ROW_OE_CNT=2 is layered on top to clean up residual ghosting visible at
+//HIGH BRIGHTNESS (where the row-active drive is strongest). ADD_LEN dropped to
+//124 to keep the total row window at 2*2 + 124 = 128 ticks.
+enum{ICN1065_ROW_OE_CNT = 2};
+enum{ICN1065_ROW_OE_ADD_LEN = 124};
 enum{ICN1065_ROW_OE_LEN = ICN1065_ROW_OE_CNT*2 + ICN1065_ROW_OE_ADD_LEN};
 
 //функции заполнения значения регистра конфигурации на 1 и 3 канала

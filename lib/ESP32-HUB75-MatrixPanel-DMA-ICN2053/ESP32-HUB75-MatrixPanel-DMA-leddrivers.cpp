@@ -34,18 +34,63 @@ const driver_rgb_t ICN2053_REG_VALUE[ICN2053_REG_CNT] = {
 };
 
 //array of values ​​for commands to write to registers
-const driver_rgb_t ICN1065_REG_VALUE[ICN1065_REG_CNT] = {
+const driver_rgb_t ICN1065_REG_VALUEs[ICN1065_REG_CNT] = {
     {0x00aa, 0x00aa, 0x00aa},
     {0x01aa, 0x01aa, 0x01aa},
-    {0x022a, 0x022a, 0x022a},
+    {0x020f, 0x020f, 0x020f},
     {0x0335, 0x0335, 0x0335},
     {0x0412, 0x0412, 0x0412},
     {0x0500, 0x0500, 0x0500},
     {0x0601, 0x0601, 0x0601},
     {0x0720, 0x0720, 0x0720},
-    {0x0c18, 0x0c18, 0x0c18},
+    // Reg 0x0c lowered from 0x18 (24) to 0x16 (22): shortens the ICN1065 row-active
+    // window so it no longer overlaps the adjacent row — ELIMINATES the vertical
+    // ghost/doubling. This is the true root-cause fix (the ghost was structural in
+    // the chip's row-drive config, which is why clock/CPU/optimization had no effect).
+    {0x0c16, 0x0c16, 0x0c16},
     {0x0d01, 0x0d01, 0x0d01},
     {0x0e86, 0x0e86, 0x0e86},
+    {0x0f01, 0x0f01, 0x0f01},
+    {0x1040, 0x1040, 0x1040},
+    {0x1127, 0x1127, 0x1127},
+    {0x1200, 0x1200, 0x1200},
+    {0x1300, 0x1300, 0x1300},
+    {0x1400, 0x1400, 0x1400},
+    {0x1500, 0x1500, 0x1500},
+    {0x1600, 0x1600, 0x1600},
+    {0x1800, 0x1800, 0x1800},
+    {0x1906, 0x1906, 0x1906},
+    {0x1c60, 0x1c60, 0x1c60},
+    {0x1dca, 0x1dca, 0x1dca},
+    {0x1e73, 0x1e73, 0x1e73},
+    {0x1f00, 0x1f00, 0x1f00},
+    {0x2000, 0x2000, 0x2000},
+    {0x2100, 0x2100, 0x2100},
+    {0x2200, 0x2200, 0x2200},
+    {0x2300, 0x2300, 0x2300},
+    {0x2400, 0x2400, 0x2400},
+    {0x2500, 0x2500, 0x2500},
+    {0x2600, 0x2600, 0x2600},
+    {0x2700, 0x2700, 0x2700},
+    {0x7000, 0x7000, 0x7000},
+    {0x7100, 0x7100, 0x7100},
+    {0x7200, 0x7200, 0x7200},
+    {0x7300, 0x7300, 0x7300},
+    {0x74a0, 0x74a0, 0x74a0}
+};
+
+const driver_rgb_t ICN1065_REG_VALUE[ICN1065_REG_CNT] = {
+    {0x00aa, 0x00aa, 0x00aa},
+    {0x01aa, 0x01aa, 0x01aa},
+    {0x020f, 0x020f, 0x020f},
+    {0x037f, 0x037f, 0x037f},
+    {0x0412, 0x0412, 0x0412},
+    {0x0500, 0x0500, 0x0500},
+    {0x0601, 0x0601, 0x0601},
+    {0x0720, 0x0720, 0x0720},
+    {0x0c15, 0x0c15, 0x0c15},
+    {0x0d01, 0x0d01, 0x0d01},
+    {0x0e80, 0x0e80, 0x0e80},
     {0x0f01, 0x0f01, 0x0f01},
     {0x1040, 0x1040, 0x1040},
     {0x1127, 0x1127, 0x1127},
@@ -234,9 +279,16 @@ int icn20xxsetOEaddrBuffer(ESP32_I2S_DMA_STORAGE_TYPE* buffer, int offset, uint8
               start_INT595 = 0;
               data = 0;
             }else
-            {       
-              data = start_INT595 | BIT_RCK;
-              if (clk_INT595_cnt >= DELAY_INT595_CLK) data |= BIT_DTK;                     
+            {
+              // The 595 samples SDI on the DTK (shift-clock) RISING edge. The
+              // seed "1" must therefore be presented only while DTK is high, NOT
+              // for the whole RCK span — otherwise SDI stays high across the
+              // entire ~61-count window (measured: 122 SDI-high words/frame),
+              // which shifts a RUN of 1s into the register and lights TWO rows
+              // at once (the equal-brightness vertical doubling). Gate SDI on the
+              // DTK sub-window so exactly one bit is clocked in per frame.
+              data = BIT_RCK;
+              if (clk_INT595_cnt >= DELAY_INT595_CLK) data |= BIT_DTK | start_INT595;
             }
           }          
         }         
@@ -413,6 +465,45 @@ static void icn1065WidenRestartOEPulse(ESP32_I2S_DMA_STORAGE_TYPE* buffer, size_
 }
 #endif
 
+// ── Option 2: blank OE around the 595 row switch ──────────────────────────────
+// The board707 DMD_STM32 reference (DMD_Mux595::set_mux + scan_dmd) switches rows
+// in an ISR with the LED output BLANKED and the OE timer resynced — a hard gap
+// between "shift the 595" and "light the LEDs". This DMA library instead weaves
+// the 595 RCK/DTK clocking into the same word stream as OE, so the outgoing row
+// overlaps the 595 shift → the faint adjacent-row ghost.
+//
+// This post-process reproduces the reference's blank gap in the DMA buffer:
+// force BIT_OE LOW for ICN1065_OE_GUARD_BLANK words IMMEDIATELY BEFORE every OE
+// rising edge. That guarantees the panel is dark for a few clocks while the 595
+// output settles on the new row, before that row is lit. It only CLEARS OE bits
+// (never adds them), so it can't create new scan/OE edges that would desync the
+// chip's row pointer — it just trims the leading edge of each OE burst.
+//
+// Set ICN1065_OE_GUARD_BLANK to 0 to disable. Tune upward if ghost persists,
+// downward if the image dims too much.
+#ifndef ICN1065_OE_GUARD_BLANK
+#define ICN1065_OE_GUARD_BLANK 0   // disabled: blanking BEFORE the OE edge re-equalized
+                                   // the two rows (made ghost worse, not better)
+#endif
+#if ICN1065_OE_GUARD_BLANK > 0
+static void icn1065BlankBeforeOE(ESP32_I2S_DMA_STORAGE_TYPE* buffer, size_t len)
+{
+  // Walk in temporal order (index ^1 for the I2S 16-bit word-pair swap). At each
+  // OE rising edge (low→high), clear OE in the preceding GUARD words.
+  bool prev_high = false;
+  for (size_t t = 0; t < len; t++)
+  {
+    bool high = (buffer[t ^ 1] & BIT_OE) != 0;
+    if (high && !prev_high)
+    {
+      for (size_t k = 1; k <= (size_t)ICN1065_OE_GUARD_BLANK && k <= t; k++)
+        buffer[(t - k) ^ 1] &= ~BIT_OE;
+    }
+    prev_high = high;
+  }
+}
+#endif
+
 void MatrixPanel_DMA::icn2053initBuffers()
 {
   int row_oe_cnt;
@@ -454,6 +545,10 @@ void MatrixPanel_DMA::icn2053initBuffers()
       if (m_cfg.driver == ICN1065)
         icn1065WidenOEPulses(dma_buff.rowBits[row_offset + row], dma_buff.row_data_len);
 #endif
+#if ICN1065_OE_GUARD_BLANK > 0
+      if (m_cfg.driver == ICN1065)
+        icn1065BlankBeforeOE(dma_buff.rowBits[row_offset + row], dma_buff.row_data_len);
+#endif
     }
     dmadesc_data[buf_id][desc_data_cnt-1].eof = true;
     dmadesc_data[buf_id][desc_data_cnt-1].qe.stqe_next = &dmadesc_ext[ICN2053_EXT_DATA];
@@ -484,6 +579,10 @@ void MatrixPanel_DMA::icn2053initBuffers()
     icn1065WidenRestartOEPulse(dma_buff.rowBits[offset_prefix], dma_buff.frame_prefix_len);
   }
 #endif
+#if ICN1065_OE_GUARD_BLANK > 0
+  if (m_cfg.driver == ICN1065)
+    icn1065BlankBeforeOE(dma_buff.rowBits[offset_prefix], dma_buff.frame_prefix_len);
+#endif
 
   frame_offset_prefix %= dma_buff.frame_suffix_len;
   frame_offset_prefix *= SIZE_DMA_TYPE;
@@ -501,6 +600,41 @@ void MatrixPanel_DMA::icn2053initBuffers()
   //заполняем буфер регененерации строк
   icn20xxsetOEaddrBuffer(dma_buff.rowBits[offset_suffix], 0, rows_per_frame, dma_buff.frame_suffix_len, 0,
                          row_oe_cnt, row_oe_add_len, m_cfg.decoder_INT595);
+
+#ifdef ICN1065_DEBUG_SCAN_DUMP
+  // DIAGNOSTIC: analyse the 595 walking-one row-scan pattern in the freshly
+  // generated suffix buffer (one full frame of row addressing). A correct 1/16
+  // ring counter must show exactly ONE SDI seed and exactly rows_per_frame (16)
+  // RCK latch edges per frame. More than one seed "in flight", or an RCK count
+  // that isn't 16, explains two rows being selected at once (the doubling).
+  if (m_cfg.driver == ICN1065 && m_cfg.decoder_INT595)
+  {
+    ESP32_I2S_DMA_STORAGE_TYPE* buf = dma_buff.rowBits[offset_suffix];
+    size_t len = dma_buff.frame_suffix_len;
+    int sdi_words = 0, rck_edges = 0, dtk_edges = 0, oe_windows = 0;
+    bool prev_rck = false, prev_dtk = false, prev_oe = false;
+    Serial.printf("\n[SCAN DUMP] suffix len=%u  rows_per_frame=%u  row_oe_len=%d\n",
+                  (unsigned)len, (unsigned)rows_per_frame,
+                  (int)(row_oe_cnt * 2 + row_oe_add_len));
+    for (size_t t = 0; t < len; t++)
+    {
+      ESP32_I2S_DMA_STORAGE_TYPE w = buf[t ^ 1];   // temporal order (I2S word-pair swap)
+      bool sdi = (w & BIT_SDI) != 0;
+      bool rck = (w & BIT_RCK) != 0;
+      bool dtk = (w & BIT_DTK) != 0;
+      bool oe  = (w & BIT_OE)  != 0;
+      if (sdi) sdi_words++;
+      if (rck && !prev_rck) rck_edges++;
+      if (dtk && !prev_dtk) dtk_edges++;
+      if (oe  && !prev_oe)  oe_windows++;
+      prev_rck = rck; prev_dtk = dtk; prev_oe = oe;
+    }
+    Serial.printf("[SCAN DUMP] SDI-high words=%d  RCK rising edges=%d  DTK rising edges=%d  OE windows=%d\n",
+                  sdi_words, rck_edges, dtk_edges, oe_windows);
+    Serial.printf("[SCAN DUMP] EXPECT for clean 1/16: 1 seed region, RCK=16, DTK=16, OE=16\n\n");
+  }
+#endif
+
 #if ICN1065_OE_PULSE_EXTRA > 0
   if (m_cfg.driver == ICN1065)
   {
@@ -510,6 +644,10 @@ void MatrixPanel_DMA::icn2053initBuffers()
     // baking the wider restart pulse in once is correct on every replay too.
     icn1065WidenRestartOEPulse(dma_buff.rowBits[offset_suffix], dma_buff.frame_suffix_len);
   }
+#endif
+#if ICN1065_OE_GUARD_BLANK > 0
+  if (m_cfg.driver == ICN1065)
+    icn1065BlankBeforeOE(dma_buff.rowBits[offset_suffix], dma_buff.frame_suffix_len);
 #endif
 
   //int desk_idx_next;
