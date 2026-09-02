@@ -12,8 +12,18 @@
  *   - Clock output: LCD_PCLK_IDX
  *   - DMA descriptors: same lldesc_t format (ESP-IDF keeps compatibility)
  *
+ * Interrupt strategy:
+ *   We use the GDMA OUT_EOF interrupt (not LCD_CAM lcd_trans_done) because:
+ *   - GDMA keeps traversing circular descriptor chains automatically
+ *   - OUT_EOF fires every time a descriptor with eof=1 is reached
+ *   - lcd_trans_done is a one-shot signal that stops the peripheral
+ *
+ *   After each OUT_EOF, we must re-trigger lcd_start because the LCD_CAM
+ *   peripheral stops consuming data when it runs out. The GDMA itself
+ *   continues looping, but the LCD output stalls without the re-trigger.
+ *
  * References:
- *   - ESP32-S3 Technical Reference Manual, Chapter "LCD_CAM"
+ *   - ESP32-S3 Technical Reference Manual, Chapter "LCD_CAM" and "GDMA"
  *   - esp-idf components/hal/lcd_hal.c
  *   - esp-idf components/esp_lcd/src/esp_lcd_panel_io_i80.c
  */
@@ -32,6 +42,7 @@
 #include <soc/gpio_sig_map.h>
 #include <soc/lcd_cam_reg.h>
 #include <soc/lcd_cam_struct.h>
+#include <soc/gdma_reg.h>
 #include <soc/gdma_struct.h>
 #include <soc/gdma_channel.h>
 #include <esp_intr_alloc.h>
@@ -44,8 +55,8 @@
 
 static callback shiftCompleteCallback = NULL;
 static volatile bool previousBufferFree = true;
-static intr_handle_t lcd_cam_intr_handle = NULL;
-static int gdma_channel_idx = 0;  // GDMA channel index allocated for LCD_CAM TX
+static intr_handle_t gdma_intr_handle = NULL;
+static int gdma_channel_idx = 0;  // GDMA TX channel index for LCD_CAM
 
 void setShiftCompleteCallback(callback f) 
 {
@@ -63,18 +74,32 @@ void i2s_parallel_set_previous_buffer_not_free()
 }
 
 // ---------------------------------------------------------------------------
-// LCD_CAM DMA Done Interrupt Handler
+// GDMA OUT_EOF Interrupt Handler
+//
+// Fires every time a descriptor with eof=1 is completed by the GDMA engine.
+// GDMA continues traversing the linked list (including circular chains)
+// automatically — it does NOT stop on EOF, only generates the interrupt.
+//
+// We re-trigger the LCD_CAM to keep it pulling data from GDMA continuously.
 // ---------------------------------------------------------------------------
 
-static void IRAM_ATTR lcd_cam_isr(void* arg)
+static void IRAM_ATTR gdma_out_eof_isr(void* arg)
 {
-  // Read and clear interrupt status via raw uint32_t to avoid volatile copy issues
-  uint32_t status = LCD_CAM.lc_dma_int_st.val;
-  LCD_CAM.lc_dma_int_clr.val = status;
+  // Read GDMA TX channel 0 interrupt status
+  uint32_t status = GDMA.channel[gdma_channel_idx].out.int_st.val;
+  // Clear all pending OUT interrupts
+  GDMA.channel[gdma_channel_idx].out.int_clr.val = status;
 
-  if (status & LCD_CAM_LCD_TRANS_DONE_INT_ST)
+  // OUT_EOF: bit 1
+  if (status & 0x02)
   {
     previousBufferFree = true;
+
+    // Re-trigger LCD_CAM so it keeps consuming data from GDMA.
+    // Without this, the LCD peripheral stalls after the first batch.
+    LCD_CAM.lcd_user.lcd_update = 1;
+    LCD_CAM.lcd_user.lcd_start = 1;
+
     if (shiftCompleteCallback)
       shiftCompleteCallback();
   }
@@ -152,10 +177,13 @@ esp_err_t i2s_parallel_driver_install(i2s_port_t port, i2s_parallel_config_t* co
   LCD_CAM.lcd_user.lcd_byte_order = 0;            // No byte swap
   LCD_CAM.lcd_user.lcd_bit_order = 0;             // MSB first
   LCD_CAM.lcd_user.lcd_dout = 1;                  // Output mode
-  LCD_CAM.lcd_user.lcd_always_out_en = 1;         // Continuous output
+  LCD_CAM.lcd_user.lcd_always_out_en = 1;         // Keep output lines active
   LCD_CAM.lcd_user.lcd_cmd = 0;                   // No command phase
   LCD_CAM.lcd_user.lcd_dummy = 0;                 // No dummy phase
-  LCD_CAM.lcd_user.lcd_dout_cyclelen = 0;         // Unlimited (DMA controls length)
+  // lcd_dout_cyclelen: number of output cycles minus 1.
+  // Set to max (0x1FFF = 8191) so each LCD "transaction" outputs 8192 words
+  // before needing a re-trigger. The GDMA OUT_EOF ISR re-triggers automatically.
+  LCD_CAM.lcd_user.lcd_dout_cyclelen = 0x1FFF;
 
   // ---- Configure LCD miscellaneous ----
   LCD_CAM.lcd_misc.val = 0;
@@ -168,6 +196,9 @@ esp_err_t i2s_parallel_driver_install(i2s_port_t port, i2s_parallel_config_t* co
   // ---- GDMA Channel Configuration ----
   gdma_channel_idx = 0;  // Use GDMA TX channel 0 for LCD output
 
+  // Enable GDMA peripheral
+  periph_module_enable(PERIPH_GDMA_MODULE);
+
   // Reset GDMA TX channel
   GDMA.channel[gdma_channel_idx].out.conf0.out_rst = 1;
   GDMA.channel[gdma_channel_idx].out.conf0.out_rst = 0;
@@ -175,19 +206,24 @@ esp_err_t i2s_parallel_driver_install(i2s_port_t port, i2s_parallel_config_t* co
   // Configure GDMA TX channel
   GDMA.channel[gdma_channel_idx].out.conf0.out_data_burst_en = 1;
   GDMA.channel[gdma_channel_idx].out.conf0.outdscr_burst_en = 1;
-  GDMA.channel[gdma_channel_idx].out.conf0.out_eof_mode = 1;   // EOF when data popped from FIFO
+  // out_eof_mode = 1: EOF when data has been popped from FIFO (i.e. actually sent)
+  GDMA.channel[gdma_channel_idx].out.conf0.out_eof_mode = 1;
   GDMA.channel[gdma_channel_idx].out.conf0.out_auto_wrback = 0;
 
-  // Connect GDMA TX channel to LCD_CAM peripheral (peripheral ID = 5)
+  // Connect GDMA TX channel to LCD_CAM peripheral (peripheral ID = 5 on ESP32-S3)
   GDMA.channel[gdma_channel_idx].out.peri_sel.sel = 5;
 
-  // ---- Setup interrupt ----
-  LCD_CAM.lc_dma_int_ena.lcd_trans_done_int_ena = 1;
+  // ---- Setup GDMA OUT_EOF interrupt ----
+  // Enable out_eof interrupt (bit 1) on this GDMA channel
+  GDMA.channel[gdma_channel_idx].out.int_ena.val = 0;
+  GDMA.channel[gdma_channel_idx].out.int_ena.out_eof = 1;
+  // Clear any pending
+  GDMA.channel[gdma_channel_idx].out.int_clr.val = 0xFFFFFFFF;
 
-  esp_err_t err = esp_intr_alloc(ETS_LCD_CAM_INTR_SOURCE,
+  esp_err_t err = esp_intr_alloc(ETS_DMA_OUT_CH0_INTR_SOURCE,
                                  ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL1,
-                                 lcd_cam_isr, NULL,
-                                 &lcd_cam_intr_handle);
+                                 gdma_out_eof_isr, NULL,
+                                 &gdma_intr_handle);
   if (err != ESP_OK) return err;
 
   // ---- Setup GPIO output signals ----
@@ -229,11 +265,20 @@ esp_err_t i2s_parallel_send_dma(i2s_port_t port, lldesc_t* dma_descriptor)
   GDMA.channel[gdma_channel_idx].out.conf0.out_rst = 1;
   GDMA.channel[gdma_channel_idx].out.conf0.out_rst = 0;
 
+  // Clear pending GDMA interrupts and re-enable OUT_EOF
+  GDMA.channel[gdma_channel_idx].out.int_clr.val = 0xFFFFFFFF;
+  GDMA.channel[gdma_channel_idx].out.int_ena.out_eof = 1;
+
   // Set DMA out-link descriptor address (20 LSBs)
   GDMA.channel[gdma_channel_idx].out.link.addr = ((uint32_t)dma_descriptor) & 0xFFFFF;
+  // Start GDMA (it will traverse the linked list, including circular chains)
   GDMA.channel[gdma_channel_idx].out.link.start = 1;
 
-  // Update LCD_CAM config and start
+  // Reset the LCD FIFO to sync with fresh DMA data
+  LCD_CAM.lcd_misc.lcd_afifo_reset = 1;
+  LCD_CAM.lcd_misc.lcd_afifo_reset = 0;
+
+  // Trigger LCD_CAM to start consuming data from GDMA
   LCD_CAM.lcd_user.lcd_update = 1;
   LCD_CAM.lcd_user.lcd_start = 1;
 
@@ -248,8 +293,15 @@ esp_err_t i2s_parallel_stop_dma(i2s_port_t port)
 {
   (void)port;
 
+  // Stop LCD output
   LCD_CAM.lcd_user.lcd_start = 0;
+
+  // Stop GDMA
   GDMA.channel[gdma_channel_idx].out.link.stop = 1;
+
+  // Disable GDMA EOF interrupt to prevent spurious callbacks
+  GDMA.channel[gdma_channel_idx].out.int_ena.val = 0;
+  GDMA.channel[gdma_channel_idx].out.int_clr.val = 0xFFFFFFFF;
 
   return ESP_OK;
 }

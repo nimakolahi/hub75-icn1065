@@ -108,9 +108,13 @@ void test_descriptor_linking()
 
   // Test DMA_MAX clamping
   lldesc_t big_desc;
-  uint8_t big_buf[8192];  // larger than DMA_MAX
-  link_dma_desc(&big_desc, NULL, big_buf, sizeof(big_buf));
-  TEST_ASSERT(big_desc.size <= DMA_MAX, "big buffer clamped to DMA_MAX");
+  uint8_t* big_buf = (uint8_t*)malloc(DMA_MAX + 100);
+  TEST_ASSERT(big_buf != NULL, "big_buf heap allocated for clamping test");
+  if (big_buf) {
+    link_dma_desc(&big_desc, NULL, big_buf, DMA_MAX + 100);
+    TEST_ASSERT(big_desc.size <= DMA_MAX, "big buffer clamped to DMA_MAX");
+    free(big_buf);
+  }
 }
 
 // ─── Test 2: Circular Descriptor Chain ────────────────────────────────────────
