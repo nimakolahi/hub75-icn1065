@@ -4,6 +4,22 @@
 #include "stdbool.h"
 #include "stdint.h"
 
+// Every write into a row/prefix/suffix buffer goes through this macro instead
+// of a raw XOR-1. The original ESP32's I2S peripheral, in 16-bit parallel
+// mode, emits each pair of consecutive 16-bit samples in SWAPPED temporal
+// order, so software has to pre-swap each sample by writing it to
+// buffer[offset^1] instead of buffer[offset]. This is a classic-ESP32-only
+// quirk: mrcodetastic/ESP32-HUB75-MatrixPanel-DMA's own
+// ESP32_TX_FIFO_POSITION_ADJUST macro applies the same swap only for
+// `ESP32_THE_ORIG` and is a no-op on every other target, since ESP32-S3's
+// LCD_CAM peripheral has no such pair-swap and is configured to consume the
+// buffer in plain sequential order.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  #define FIFO_POS_ADJUST(x) (x)
+#else
+  #define FIFO_POS_ADJUST(x) ((x) ^ 1)
+#endif
+
 //размерность регистров драйверов
 typedef int16_t driver_reg_t;
 //битность регистров
