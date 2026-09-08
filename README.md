@@ -1,6 +1,15 @@
 # ESP32 HUB75 Driver for ICN1065 SPWM Panels
 
-A from-scratch ESP32 Arduino driver for HUB75 LED matrix panels that use the **ICN1065** (ICND1065) Scramble-PWM driver IC. It uses the ESP32's I2S peripheral in 16-bit parallel mode with DMA linked-list descriptors for zero-CPU pixel output, and inherits Adafruit GFX so all text and drawing primitives work out of the box.
+A from-scratch ESP32 Arduino driver for HUB75 LED matrix panels that use the **ICN1065** (ICND1065) Scramble-PWM driver IC. It clocks out a 16-bit parallel bus with DMA linked-list descriptors for zero-CPU pixel output, and inherits Adafruit GFX so all text and drawing primitives work out of the box.
+
+**Supported targets:**
+
+| Target | Parallel-output peripheral | Backend source |
+|--------|---------------------------|----------------|
+| Classic **ESP32** (DOIT DevKit V1 etc.) | I2S (`I2S_NUM_1`) in 16-bit LCD/parallel mode | `esp32_i2s_parallel_v2.h/.cpp` |
+| **ESP32-S3** | LCD_CAM + GDMA — the S3 has no I2S parallel mode | `esp32s3_lcd_cam_parallel.h/.cpp` |
+
+The backend is picked at compile time from `CONFIG_IDF_TARGET_ESP32S3`; the ICN1065 protocol, buffer pipeline, coordinate mapping and drawing layers are shared and identical on both. See [Section 4](#4-how-the-esp32-drives-hub75--parallel-dma-output) for the peripheral differences and [Section 9](#9-gpio-wiring) for the pin maps.
 
 ---
 
@@ -9,7 +18,7 @@ A from-scratch ESP32 Arduino driver for HUB75 LED matrix panels that use the **I
 1. [Hardware Overview](#1-hardware-overview)
 2. [The ICN1065 Chip — What It Is and Why It Matters](#2-the-icn1065-chip--what-it-is-and-why-it-matters)
 3. [The ICN1065 Serial Protocol](#3-the-icn1065-serial-protocol)
-4. [How the ESP32 Drives HUB75 — I2S in Parallel Mode](#4-how-the-esp32-drives-hub75--i2s-in-parallel-mode)
+4. [How the ESP32 Drives HUB75 — Parallel DMA Output](#4-how-the-esp32-drives-hub75--parallel-dma-output)
 5. [The DMA Buffer Pipeline](#5-the-dma-buffer-pipeline)
 6. [The Frame Buffer — Where You Draw](#6-the-frame-buffer--where-you-draw)
 7. [Coordinate Mapping: Physical Panel ↔ Frame Buffer](#7-coordinate-mapping-physical-panel--frame-buffer)
@@ -33,8 +42,12 @@ A from-scratch ESP32 Arduino driver for HUB75 LED matrix panels that use the **I
 
 ### The microcontroller
 
-- **ESP32** (DOIT DevKit V1 or equivalent)
-- Uses the **I2S peripheral** (I2S_NUM_1) in 16-bit LCD/parallel mode — not for audio at all. This peripheral can clock out a 16-bit bus at a fixed frequency, driven entirely by DMA. The CPU does not bit-bang any signals.
+Either of:
+
+- **ESP32** (DOIT DevKit V1 or equivalent) — uses the **I2S peripheral** (I2S_NUM_1) in 16-bit LCD/parallel mode, not for audio at all.
+- **ESP32-S3** (DevKitC-1, Waveshare ESP32-S3-RGB-Matrix, or equivalent) — uses the dedicated **LCD_CAM peripheral** driven by **GDMA**. The S3's I2S peripheral dropped the LCD/parallel mode the classic ESP32 has, so LCD_CAM is the replacement path.
+
+Either way the peripheral clocks out a 16-bit bus at a fixed frequency, driven entirely by DMA. The CPU does not bit-bang any signals.
 
 ### The HUB75 connector signals
 
@@ -49,7 +62,7 @@ A standard HUB75 connector carries:
 | OE | Output Enable: active HIGH on ICN1065 (triggers row advance) |
 | CLK | Shift-clock for serial data |
 
-All 13 of these signals are driven simultaneously by one 16-bit I2S parallel clock cycle. Each 16-bit word output by DMA encodes all signals at once.
+All of these signals are driven simultaneously by one 16-bit parallel-bus clock cycle. Each 16-bit word output by DMA encodes all signals at once — on classic ESP32 via I2S, on ESP32-S3 via LCD_CAM.
 
 ---
 
@@ -162,13 +175,15 @@ This is the most important tuning parameter for this panel. See [Section 13](#13
 
 ---
 
-## 4. How the ESP32 Drives HUB75 — I2S in Parallel Mode
+## 4. How the ESP32 Drives HUB75 — Parallel DMA Output
 
-### Why I2S?
+Both supported targets do the same job — clock a 16-bit word out of DMA onto 16 GPIOs every pixel clock — but they use different silicon to do it. The backend is selected by `#if defined(CONFIG_IDF_TARGET_ESP32S3)` in `ESP32-HUB75-MatrixPanel-DMA-icn2053.h`, and both backends expose the *same* C API (`i2s_parallel_driver_install()`, `i2s_parallel_send_dma()`, `setShiftCompleteCallback()`, …), so nothing above them has to know which one is compiled in.
 
-The ESP32 has no dedicated LCD or parallel-bus peripheral with DMA. However, the I2S peripheral (designed for audio) has a mode where it outputs a 16-bit parallel bus clocked at a fixed frequency — exactly what we need to drive a HUB75 panel.
+### Classic ESP32 — why I2S?
 
-### I2S configuration
+The classic ESP32 has no dedicated LCD or parallel-bus peripheral with DMA. However, the I2S peripheral (designed for audio) has a mode where it outputs a 16-bit parallel bus clocked at a fixed frequency — exactly what we need to drive a HUB75 panel.
+
+### I2S configuration (classic ESP32)
 
 - **Peripheral:** I2S_NUM_1
 - **Mode:** LCD/parallel, 16-bit
@@ -176,7 +191,7 @@ The ESP32 has no dedicated LCD or parallel-bus peripheral with DMA. However, the
 - **Clock phase:** `CLK_POZITIVE` — data is valid on the rising edge
 - **DMA:** Linked-list descriptors, automatically reloaded (circular buffer)
 
-The I2S peripheral in this mode outputs one 16-bit word per CLK cycle. Each word's bits map to the physical GPIO pins:
+The I2S peripheral in this mode outputs one 16-bit word per CLK cycle. Each word's bits map to the physical GPIO pins (example uses the classic-ESP32 pin map from [Section 9](#9-gpio-wiring)):
 
 ```
 Bit  0  → R1  (GPIO 25)
@@ -195,9 +210,33 @@ Bit 12  → E   (not connected, -1)
 Bits 13-15 → unused
 ```
 
-### The byte-swap quirk
+### ESP32-S3 — LCD_CAM + GDMA instead of I2S
 
-The ESP32 I2S DMA engine byte-swaps every 16-bit word before outputting it. This means if you want to output the word `0xAABB`, the DMA buffer must contain `0xBBAA`. The library compensates for this everywhere by XOR-ing buffer offsets with 1 (`buffer[offset ^ 1]`).
+The ESP32-S3's I2S peripheral **dropped** the LCD/parallel output mode, so the classic backend cannot be built for it. In its place the S3 gained a dedicated **LCD_CAM** peripheral, fed by the general-purpose **GDMA** engine. `esp32s3_lcd_cam_parallel.cpp` drives it directly via register writes plus the official `esp_private/gdma.h` channel API; it is a register-for-register port of the proven S3 backend in [mrcodetastic/ESP32-HUB75-MatrixPanel-DMA](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA) (`src/platforms/esp32s3/gdma_lcd_parallel16.cpp`).
+
+- **Peripheral:** LCD_CAM in i8080 mode (`lcd_rgb_mode_en = 0`), 16-bit (`lcd_2byte_en = 1`), `lcd_always_out_en = 1`
+- **Source clock:** PLL_F160M (`lcd_clk_sel = 3`); the pixel clock is `160 MHz / lcd_clkm_div_num`, with the divider computed from the requested `clk_freq`
+- **Clock phase:** `CLK_POZITIVE` maps to `lcd_ck_out_edge`
+- **DMA:** GDMA channel in `GDMA_TRIG_PERIPH_LCD` mode, walking the same `lldesc_t` linked list the classic backend builds — the descriptor chain and the whole [buffer pipeline](#5-the-dma-buffer-pipeline) are unchanged
+- **Row pipelining:** the GDMA EOF interrupt calls the same `setShiftCompleteCallback()` handler the I2S EOF interrupt does
+
+Everything above the backend — the ICN1065 packet protocol, the prefix/row/suffix buffers, `prepareDmaRows()`, the coordinate mapping, `VirtualMatrixPanel` — is shared source, compiled identically for both targets.
+
+### The byte-swap quirk (and why it is target-specific)
+
+The **classic ESP32's** I2S DMA engine swaps every *pair* of 16-bit samples in its TX FIFO before outputting them. This means if you want to output the word at offset `n`, the DMA buffer must hold it at offset `n ^ 1`. The **ESP32-S3's** LCD_CAM has no such quirk — it consumes the buffer in plain sequential order.
+
+The library therefore does not hardcode the XOR any more. Every buffer write goes through a macro in `ESP32-HUB75-MatrixPanel-DMA-leddrivers.h`:
+
+```cpp
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  #define FIFO_POS_ADJUST(x) (x)        // LCD_CAM: sequential, no swap
+#else
+  #define FIFO_POS_ADJUST(x) ((x) ^ 1)  // classic ESP32 I2S: pair swap
+#endif
+```
+
+This mirrors the same distinction mrcodetastic's `ESP32_TX_FIFO_POSITION_ADJUST` macro makes, for the same reason. Getting this wrong on S3 is not subtle: every 16-bit word in the ICN1065 command/data stream lands in the wrong slot, so LAT pulse widths decode as the wrong commands and the panel stays dark.
 
 ---
 
@@ -470,6 +509,10 @@ vdisplay->drawChar(2, 2, 'A', color565(255,255,0), 0, 3); // large character
 
 ## 9. GPIO Wiring
 
+The pin map lives in `hub75_cfg_t.gpio` in `src/main.cpp`, which ships with the classic-ESP32 map below; on an ESP32-S3 replace that block with the S3 map (or branch on `#if defined(CONFIG_IDF_TARGET_ESP32S3)` if you build both). Any GPIO capable of output will work on either target — the maps below are the ones this project has actually run.
+
+### Classic ESP32 (DOIT DevKit V1)
+
 ```
 ESP32 GPIO  │  HUB75 Signal  │  Function
 ────────────┼────────────────┼─────────────────────────────
@@ -488,6 +531,48 @@ ESP32 GPIO  │  HUB75 Signal  │  Function
     15      │      OE        │  Output Enable (active HIGH on ICN1065)
     16      │      CLK       │  Shift clock
 ```
+
+### ESP32-S3 (works on any ESP32-S3 board)
+
+```
+S3 GPIO     │  HUB75 Signal  │  Function
+────────────┼────────────────┼─────────────────────────────
+     4      │      R1        │  Red,   upper half
+     5      │      G1        │  Green, upper half
+     6      │      B1        │  Blue,  upper half
+     7      │      R2        │  Red,   lower half
+    15      │      G2        │  Green, lower half
+    16      │      B2        │  Blue,  lower half
+    18      │       A        │  Row address bit 0
+     8      │       B        │  Row address bit 1
+     3      │       C        │  Row address bit 2
+    —       │       D        │  Not connected (1/8 scan only needs A,B,C)
+    —       │       E        │  Not connected (see note below)
+    40      │      LAT       │  Latch
+     2      │      OE        │  Output Enable (active HIGH on ICN1065)
+    41      │      CLK       │  Shift clock
+```
+
+```cpp
+.gpio = {
+  .r1 = 4,  .g1 = 5,  .b1 = 6,
+  .r2 = 7,  .g2 = 15, .b2 = 16,
+  .a  = 18, .b  = 8,  .c  = 3,  .d = -1, .e = -1,
+  .lat = 40, .oe = 2, .clk = 41,
+},
+```
+
+This is the generic **recommended ESP32-S3 pinout** from mrcodetastic/ESP32-HUB75-MatrixPanel-DMA (`src/platforms/esp32s3/esp32s3-default-pins.hpp`). Two things make it a good default for *any* S3 board rather than a board-specific map:
+
+- **Waveshare ESP32-S3-RGB-Matrix** boards have their onboard HUB75 connector routed to exactly these pins — the PCB traces are fixed, so on those boards this map is not a choice, it is the wiring. (Waveshare vendors that same header byte-for-byte in their own example code.)
+- On a **jumper-wired board** (ESP32-S3-WROOM-2 DevKitC-1 and friends) the same pins are all free and general-purpose, so there is no reason to pick different ones. This project runs the identical map on both.
+
+Notes when adapting it:
+
+- **Modules with Octal SPI flash/PSRAM (e.g. ESP32-S3-WROOM-2) reserve GPIO 26–37** for the internal flash/PSRAM die. They are not available as GPIO — driving one mid-boot stalls the instruction-fetch bus and hangs the chip until the watchdog resets it. The map above deliberately stays clear of that range.
+- **GPIO 38** is avoided: many DevKitC-1 boards (and clones) wire the onboard addressable RGB LED's data line there.
+- **GPIO 39–42** are the JTAG pins (MTCK/MTDO/MTDI/MTMS). Only `lat = 40` and `clk = 41` land there; that is fine unless you need in-line JTAG debugging, in which case move them.
+- **`.e = -1`** is correct for 1/8-scan (this panel) and 1/16-scan panels. A 64×64 / 1:32-scan panel needs the E address line — Waveshare's own example sets `.e = 9` for that case.
 
 > **Important:** The ICN1065's OE is **active HIGH**, opposite to the active-LOW OE on traditional HUB75 panels with shift-register drivers. Do not mix up OE polarity if using a different driver IC.
 
@@ -525,7 +610,7 @@ hub75_cfg_t mxconfig = {
     .mx_count_height = 1,       // number of panels chained vertically
     .gpio = { ... },            // see GPIO section above
     .driver         = ICN1065,  // selects ICN1065 protocol throughout
-    .clk_freq       = HZ_5M,    // 5 MHz I2S clock
+    .clk_freq       = HZ_5M,    // requested pixel clock (see note below)
     .clk_phase      = CLK_POZITIVE, // data valid on rising edge
     .color_depth    = COLORx16, // 16-bit SPWM mode (full ICN1065 capability)
     .double_buff    = DOUBLE_BUFF_OFF,  // single frame buffer
@@ -535,6 +620,19 @@ hub75_cfg_t mxconfig = {
     .phys_height    = 32,       // actual physical panel height in pixels
 };
 ```
+
+### `clk_freq` on ESP32 vs ESP32-S3
+
+`clk_freq` is a requested frequency in Hz (`HZ_5M`, `HZ_10M`, `HZ_13M`, `HZ_20M` — see `ESP32-HUB75-MatrixPanel-DMA-types.h`), but each backend derives the actual pixel clock from a different source clock and divider:
+
+| | Source clock | Divider |
+|---|---|---|
+| Classic ESP32 (I2S) | 80 MHz | `80 MHz / clk_freq / 2` (16-bit sample width) |
+| ESP32-S3 (LCD_CAM) | 160 MHz (PLL_F160M) | `160 MHz / clk_freq`, clamped to 2…256 |
+
+Because the dividers are integer, not every requested value is reachable exactly on both targets. If you port a working configuration between an ESP32 and an ESP32-S3, **verify the resulting CLK on a scope or logic analyzer** rather than assuming the same `clk_freq` constant produces the same wire timing.
+
+One S3-specific caveat: on boards with **Octal PSRAM**, GDMA and the PSRAM controller contend for memory bandwidth, and at high pixel clocks the DMA can starve mid-row — which shows up as a dark or visibly glitching panel rather than an error. If an S3 board misbehaves at a high `clk_freq`, step it down before suspecting the wiring. (Background: mrcodetastic/ESP32-HUB75-MatrixPanel-DMA issue #926.)
 
 ### `ICN1065_ROW_OE_CNT` — the critical timing parameter
 
@@ -677,7 +775,10 @@ HUB75_1065L1.0/
 │   │   │                                            setPanelBrightness
 │   │   ├── ESP32-HUB75-VirtualMatrixPanel.h      Coordinate remapping +
 │   │   │                                          Adafruit GFX interface
-│   │   ├── esp32_i2s_parallel_v2.h/.cpp          I2S peripheral setup and DMA
+│   │   ├── esp32_i2s_parallel_v2.h/.cpp          Classic ESP32 backend:
+│   │   │                                          I2S parallel setup and DMA
+│   │   ├── esp32s3_lcd_cam_parallel.h/.cpp       ESP32-S3 backend: LCD_CAM
+│   │   │                                          peripheral + GDMA, same API
 │   │   ├── color_convert.h / color-convert.cpp    RGB565 ↔ RGB888 helpers
 │   │   └── ESP32-HUB75-MatrixPanel-DMA-types.h   hub75_cfg_t and related types
 │   │
@@ -698,6 +799,7 @@ HUB75_1065L1.0/
 | Fix coordinate mapping | `lib/ESP32-HUB75-MatrixPanel-DMA-ICN2053/ESP32-HUB75-VirtualMatrixPanel.h` (`getCoords`) |
 | Fix color channel order | `lib/ESP32-HUB75-MatrixPanel-DMA-ICN2053/ESP32-HUB75-MatrixPanel-DMA-icn2053.cpp` (`prepareDmaRows`) |
 | Change clock speed | `src/main.cpp` (`hub75_cfg_t.clk_freq`) |
+| Change the ESP32-S3 parallel-output backend | `lib/ESP32-HUB75-MatrixPanel-DMA-ICN2053/esp32s3_lcd_cam_parallel.cpp` |
 | Change ICN1065 register values | `lib/ESP32-HUB75-MatrixPanel-DMA-ICN2053/ESP32-HUB75-MatrixPanel-DMA-leddrivers.cpp` (`ICN1065_REG_VALUE[]`) |
 
 ---
@@ -825,7 +927,45 @@ pio run --target upload
 pio device monitor --baud 115200
 ```
 
-The project targets `esp32doit-devkit-v1`. To use a different ESP32 board, change the `board` field in `platformio.ini`.
+The shipped `platformio.ini` targets `esp32doit-devkit-v1` (classic ESP32). To use a different classic ESP32 board, change the `board` field.
+
+### Building for ESP32-S3
+
+Add a second environment to `platformio.ini` and build it with `pio run -e esp32-s3-devkitc-1`:
+
+```ini
+[env:esp32-s3-devkitc-1]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+monitor_speed = 115200
+lib_deps =
+    adafruit/Adafruit GFX Library@^1.11.0
+
+build_flags =
+    -DCONFIG_IDF_TARGET_ESP32S3
+    -DUSE_DMDSPI=0
+    -DARDUINO_USB_CDC_ON_BOOT=1
+```
+
+Three of those flags matter:
+
+- **`-DCONFIG_IDF_TARGET_ESP32S3` is required, not redundant.** Under PlatformIO's Arduino framework this macro is not visible to `#if` unless something has already `#include`d `sdkconfig.h`. Defining it as a global compiler flag is what makes every `#if defined(CONFIG_IDF_TARGET_ESP32S3)` guard in this library — backend selection in `ESP32-HUB75-MatrixPanel-DMA-icn2053.h`, `FIFO_POS_ADJUST` in `…-leddrivers.h`, and the target guards in both backend sources — actually take effect. Without it the build selects the classic I2S backend, which is explicitly guarded off for S3 and references I2S registers the S3 does not have, so it fails to build.
+- **`-DARDUINO_USB_CDC_ON_BOOT=1`** forces the native USB-CDC port to initialize at boot. Without it, CDC only finishes initializing on the first `Serial.begin()`, and early boot output is silently dropped before the host has opened the port.
+- `-DUSE_DMDSPI=0` is the same flag the classic environment uses.
+
+If your S3 board has **Octal** SPI flash/PSRAM (ESP32-S3-WROOM-2, for instance), the generic `esp32-s3-devkitc-1` board definition assumes Quad flash and no PSRAM, so add the overrides for your part to that same environment — for example, for a 32 MB Octal flash / 16 MB Octal PSRAM module:
+
+```ini
+board_build.flash_mode = opi
+board_build.psram_type = opi
+board_build.arduino.memory_type = opi_opi
+board_upload.flash_size = 32MB
+```
+
+...and append `-DBOARD_HAS_PSRAM` to that environment's `build_flags`.
+
+Confirm the actual flash and PSRAM configuration of your module with `esptool.py flash_id` rather than reading the label — and see the Octal-PSRAM bandwidth caveat in [Section 10](#10-configuration-reference).
 
 ---
 
