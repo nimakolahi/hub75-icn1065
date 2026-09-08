@@ -87,7 +87,7 @@ int data_set(ESP32_I2S_DMA_STORAGE_TYPE* buffer, int offset,  ESP32_I2S_DMA_STOR
 {	
 	while(len > 0)
 	{
-		buffer[offset^1] |= data_mask;
+		buffer[FIFO_POS_ADJUST(offset)] |= data_mask;
     offset++;
     len--;
 	}
@@ -99,7 +99,7 @@ int data_clr(ESP32_I2S_DMA_STORAGE_TYPE* buffer, int offset,  ESP32_I2S_DMA_STOR
 {
 	while(len > 0)
 	{
-		buffer[offset^1] &= ~data_mask;
+		buffer[FIFO_POS_ADJUST(offset)] &= ~data_mask;
     offset++;
     len--;
 	}
@@ -121,7 +121,7 @@ int setDataRegBuffer(ESP32_I2S_DMA_STORAGE_TYPE* buffer, int offset, const drive
 		if (g < 0) d |= BIT_G1|BIT_G2; g <<= 1;
 		if (b < 0) d |= BIT_B1|BIT_B2; b <<= 1;
 
-    int j = offset^1;
+    int j = FIFO_POS_ADJUST(offset);
 		buffer[j] = (buffer[j] & ~BITMASK_RGB12) | d;
 		offset++;
 	}  
@@ -161,7 +161,7 @@ int setLatRowBuffer(ESP32_I2S_DMA_STORAGE_TYPE* buffer, int offset, int subrow_c
   int i = offset + subrow_len-1;
   while(subrow_cnt > 0)
   {
-    buffer[i^1] |= BIT_LAT;
+    buffer[FIFO_POS_ADJUST(i)] |= BIT_LAT;
     i += subrow_len + SUBROW_ADD_LEN;
     subrow_cnt--;
   }
@@ -216,7 +216,7 @@ int icn20xxsetOEaddrBuffer(ESP32_I2S_DMA_STORAGE_TYPE* buffer, int offset, uint8
     {     
       if (oe_cnt > 0) 
       {
-        buffer[offset^1] = BIT_OE;
+        buffer[FIFO_POS_ADJUST(offset)] = BIT_OE;
         oe_cnt--;
         if (oe_cnt == 0)
         {
@@ -240,25 +240,25 @@ int icn20xxsetOEaddrBuffer(ESP32_I2S_DMA_STORAGE_TYPE* buffer, int offset, uint8
             }
           }          
         }         
-        buffer[offset^1] = data;      
+        buffer[FIFO_POS_ADJUST(offset)] = data;
       }
       row_offset++;
       frame_offset++;
       offset++;
       if (offset == buffer_len) break;
-      buffer[offset^1] = data;      
+      buffer[FIFO_POS_ADJUST(offset)] = data;
     }else
     {
       if (oe_cnt > 0) 
       {
-        buffer[offset^1] = data | BIT_OE;
+        buffer[FIFO_POS_ADJUST(offset)] = data | BIT_OE;
         oe_cnt--;
-      }else buffer[offset^1] = data;
+      }else buffer[FIFO_POS_ADJUST(offset)] = data;
       row_offset++;
       frame_offset++;
       offset++;
       if (offset == buffer_len) break;
-      buffer[offset^1] = data;
+      buffer[FIFO_POS_ADJUST(offset)] = data;
     }
     
     row_offset++;
@@ -385,7 +385,7 @@ static void icn1065DelayOEPulses(ESP32_I2S_DMA_STORAGE_TYPE* buffer, size_t len)
   bool prev_high = false;
   for (size_t t = 0; t < len && count < MAX_PULSES; t++)
   {
-    bool high = (buffer[t ^ 1] & BIT_OE) != 0;
+    bool high = (buffer[FIFO_POS_ADJUST(t)] & BIT_OE) != 0;
     if (high && !prev_high) positions[count++] = t;
     prev_high = high;
   }
@@ -400,8 +400,8 @@ static void icn1065DelayOEPulses(ESP32_I2S_DMA_STORAGE_TYPE* buffer, size_t len)
     // pulse late by 0" rather than "one pulse missing" (iron rule: edge
     // count must never change).
     if (nt >= len) continue;
-    buffer[t ^ 1] &= ~BIT_OE;
-    buffer[nt ^ 1] |= BIT_OE;
+    buffer[FIFO_POS_ADJUST(t)] &= ~BIT_OE;
+    buffer[FIFO_POS_ADJUST(nt)] |= BIT_OE;
   }
 }
 #endif
@@ -409,19 +409,19 @@ static void icn1065DelayOEPulses(ESP32_I2S_DMA_STORAGE_TYPE* buffer, size_t len)
 // Widen each ROW/OE scan pulse by ICN1065_OE_PULSE_EXTRA ticks after its rising
 // edge, to satisfy the ICND1065's 280 ns twROW minimum at faster DCLK.
 // Contiguous high extension only — edge count and edge positions are unchanged.
-// Walks in TEMPORAL order: index t^1 because the I2S peripheral swaps each
-// 16-bit word pair.
+// Walks in TEMPORAL order: index FIFO_POS_ADJUST(t) because the classic
+// ESP32's I2S peripheral swaps each 16-bit word pair (see leddrivers.h).
 #if ICN1065_OE_PULSE_EXTRA > 0
 static void icn1065WidenOEPulses(ESP32_I2S_DMA_STORAGE_TYPE* buffer, size_t len)
 {
   bool prev_high = false;   // widening at t=0 is safe either way (never adds an edge)
   for (size_t t = 0; t < len; t++)
   {
-    bool high = (buffer[t ^ 1] & BIT_OE) != 0;
+    bool high = (buffer[FIFO_POS_ADJUST(t)] & BIT_OE) != 0;
     if (high && !prev_high)
       for (size_t k = t + 1; k <= t + ICN1065_OE_PULSE_EXTRA && k < len; k++)
-        buffer[k ^ 1] |= BIT_OE;
-    prev_high = (buffer[t ^ 1] & BIT_OE) != 0;
+        buffer[FIFO_POS_ADJUST(k)] |= BIT_OE;
+    prev_high = (buffer[FIFO_POS_ADJUST(t)] & BIT_OE) != 0;
   }
 }
 
@@ -444,7 +444,7 @@ static void icn1065WidenRestartOEPulse(ESP32_I2S_DMA_STORAGE_TYPE* buffer, size_
   bool prev_high = false;
   for (size_t t = 0; t < len; t++)
   {
-    bool high = (buffer[t ^ 1] & BIT_OE) != 0;
+    bool high = (buffer[FIFO_POS_ADJUST(t)] & BIT_OE) != 0;
     if (high && !prev_high)
     {
       // BUG FIXED (per board707's logic-analyzer measurement — this was
@@ -453,7 +453,7 @@ static void icn1065WidenRestartOEPulse(ESP32_I2S_DMA_STORAGE_TYPE* buffer, size_
       // ticks must start AFTER that, not at t+1 (which redundantly re-set
       // already-high ticks and only net 5 new ones instead of 8).
       for (size_t k = t + ICN1065_OE_LEN_REGULAR; k < t + ICN1065_OE_LEN_RESTART && k < len; k++)
-        buffer[k ^ 1] |= BIT_OE;
+        buffer[FIFO_POS_ADJUST(k)] |= BIT_OE;
       return;   // only the first edge in the buffer — every later pulse is left alone
     }
     prev_high = high;

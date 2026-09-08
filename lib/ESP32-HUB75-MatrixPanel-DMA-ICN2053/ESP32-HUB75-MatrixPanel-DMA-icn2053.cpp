@@ -156,7 +156,7 @@ IRAM_ATTR void MatrixPanel_DMA::prepareDmaRows(uint8_t row_offset, uint8_t dma_b
         if (pixel2.g < 0) mask_rgb12 |= BIT_G2; pixel2.g <<= 1;
         if (pixel2.b < 0) mask_rgb12 |= BIT_B2; pixel2.b <<= 1;
 
-        int offset_dma = dma_buff_offset ^ 1;        
+        int offset_dma = FIFO_POS_ADJUST(dma_buff_offset);
         dma_buff.rowBits[row_dma_offset][offset_dma] = (dma_buff.rowBits[row_dma_offset][offset_dma] & (~BITMASK_RGB12))|mask_rgb12;
         dma_buff_offset++;
       }
