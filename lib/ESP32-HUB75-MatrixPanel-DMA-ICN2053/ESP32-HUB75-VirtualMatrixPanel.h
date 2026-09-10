@@ -70,6 +70,18 @@ public:
   void drawPixel(int16_t x, int16_t y, uint16_t color) override;
 
   void drawPixelRGB888(int16_t x, int16_t y, uint8_t r, uint8_t g, uint8_t b);
+
+  // Bulk-write a w x h block of RGB565 pixels (row-major, buf[row*w+col]) at
+  // virtual (x,y) -- e.g. straight from a GFXcanvas16's getBuffer(). Same
+  // result as calling drawPixel() for every pixel in the block, just faster:
+  // getCoords()'s panel/bank division-and-modulo math only has to run once
+  // per physical-panel-column run instead of once per pixel, since within one
+  // physical panel the DMA x coordinate increases by exactly +2 per source
+  // pixel (see getCoords()'s VP_FOUR_SCAN_32PX_HIGH case). Falls back to the
+  // plain per-pixel path for any other scan rate, so behaviour is identical
+  // either way -- this is purely a speed path for the common case.
+  void writeBuffer16(int16_t x, int16_t y, int16_t w, int16_t h, const uint16_t *buf);
+
   void fillScreen(uint16_t color) { display->fillScreen(color); }
   void clearScreen()              { display->clearScreen(); }
   void flipDMABuffer()            { display->flipDMABuffer(); }
@@ -160,6 +172,61 @@ inline void VirtualMatrixPanel::drawPixelRGB888(int16_t x, int16_t y,
                                                  uint8_t r, uint8_t g, uint8_t b)
 {
   drawPixel(x, y, color565(r, g, b));
+}
+
+inline void VirtualMatrixPanel::writeBuffer16(int16_t x, int16_t y,
+                                               int16_t w, int16_t h,
+                                               const uint16_t *buf)
+{
+  if (scan_rate != VP_FOUR_SCAN_32PX_HIGH) {          // only the fast path below
+    for (int16_t row = 0; row < h; row++)             // is derived for this mode --
+      for (int16_t col = 0; col < w; col++)           // any other mode falls back to
+        drawPixel(x + col, y + row, buf[row * w + col]); // the plain per-pixel path.
+    return;
+  }
+
+#ifndef NO_GFX
+  int16_t width_ = _width, height_ = _height;
+#else
+  int16_t width_ = (int16_t)virt_w, height_ = (int16_t)virt_h;
+#endif
+  int16_t panels_x = (int16_t)(width_ / spw);
+
+  for (int16_t row = 0; row < h; row++) {
+    int16_t absY = y + row;
+    if (absY < 0 || absY >= height_) continue;        // whole row off-panel -> skip
+
+    int16_t panel_row = absY / (int16_t)sph;
+    int16_t local_y    = absY % (int16_t)sph;
+    int16_t bank        = ((local_y & 8) == 0) ? 1 : 0;
+    int16_t dy           = (int16_t)((local_y & 7) | (((local_y >> 4) & 1) * 8));
+
+    int16_t col = 0;
+    while (col < w) {
+      int16_t absX = x + col;
+      if (absX < 0)          { col++; continue; }     // off-panel column -> skip one at a time
+      if (absX >= width_)    break;                    // rest of the row is off-panel too
+
+      int16_t panel_col = absX / (int16_t)spw;
+      int16_t local_x    = absX % (int16_t)spw;
+      int16_t panel_idx  = panel_row * panels_x + panel_col;
+      int16_t dx          = panel_idx * (int16_t)(spw * 2) + 2 * local_x + bank;
+
+      // Run of columns until the next physical-panel boundary (or box/panel edge) --
+      // within that run dx increases by exactly +2 per pixel, so getCoords()'s
+      // division/modulo only has to happen once for the whole run.
+      int16_t runLen = (int16_t)spw - local_x;
+      if (runLen > w - col) runLen = w - col;
+      if (absX + runLen > width_) runLen = width_ - absX;
+
+      const uint16_t *src = &buf[row * w + col];
+      for (int16_t k = 0; k < runLen; k++) {
+        display->writePixelDMA(dx, dy, src[k]);
+        dx += 2;
+      }
+      col += runLen;
+    }
+  }
 }
 
 #endif // ESP32_HUB75_VIRTUAL_MATRIX_PANEL_H
