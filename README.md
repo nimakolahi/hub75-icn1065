@@ -1,4 +1,4 @@
-# ESP32 HUB75 Driver for ICN1065 SPWM Panels
+# ESP32 HUB75 Driver for ICN1065L SPWM Panels
 
 A from-scratch ESP32 Arduino driver for HUB75 LED matrix panels that use the **ICN1065** (ICND1065) Scramble-PWM driver IC. It clocks out a 16-bit parallel bus with DMA linked-list descriptors for zero-CPU pixel output, and inherits Adafruit GFX so all text and drawing primitives work out of the box.
 
