@@ -177,7 +177,7 @@ IRAM_ATTR void MatrixPanel_DMA::prepareDmaRows(uint8_t row_offset, uint8_t dma_b
       }else
       {
         offset_x++;
-        if (pixels_per_row == 0) offset_x = 0;
+        if (offset_x >= pixels_per_row) offset_x = 0;
       }
     }
     row_offset++;
